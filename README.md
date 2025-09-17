@@ -1,1 +1,3 @@
 I needed a way to specify the amount of frames for sprites in game projects so I threw this together.
+
+![ui](img/ui.png)
