@@ -10,12 +10,14 @@ from PySide6.QtWidgets import (
     QLabel,
     QTreeWidget,
     QTreeWidgetItem,
-    QGridLayout,
     QFileDialog,
     QLineEdit,
     QMessageBox,
     QGraphicsView,
-    QGraphicsScene
+    QGraphicsScene,
+    QGraphicsItemGroup,
+    QGraphicsPolygonItem,
+    QGraphicsLineItem
 )
 from PySide6.QtGui import (
     QBrush,
@@ -24,17 +26,99 @@ from PySide6.QtGui import (
     QImage,
     QPen,
     QAction,
-    QKeySequence
+    QKeySequence,
+    QPolygonF
 )
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import (
+    Qt,
+    QRectF,
+    QPointF
+)
+
+class OriginPoint(QGraphicsItemGroup):
+    def __init__(self, sprite_manager, x=0, y=0, size=8):
+        super().__init__()
+        self.sprite_manager = sprite_manager
+        self.size = size
+        
+        rhombus_points = [
+            QPointF(0, -size),      # top
+            QPointF(size, 0),       # right
+            QPointF(0, size),       # bottom
+            QPointF(-size, 0)       # left
+        ]
+        rhombus_polygon = QPolygonF(rhombus_points)
+        self.rhombus = QGraphicsPolygonItem(rhombus_polygon)
+        self.rhombus.setBrush(QBrush(QColor(128, 128, 128, 200)))
+        self.rhombus.setPen(QPen(QColor(255, 255, 255), 1))
+        
+        # create anchor lines
+        line_length = size * 0.5
+        self.top_line = QGraphicsLineItem(0, -size, 0, -size - line_length)
+        self.bottom_line = QGraphicsLineItem(0, size, 0, size + line_length)
+        self.left_line = QGraphicsLineItem(-size, 0, -size - line_length, 0)
+        self.right_line = QGraphicsLineItem(size, 0, size + line_length, 0)
+        
+        line_pen = QPen(QColor(255, 255, 255), 1)
+        self.top_line.setPen(line_pen)
+        self.bottom_line.setPen(line_pen)
+        self.left_line.setPen(line_pen)
+        self.right_line.setPen(line_pen)
+        
+        # add all parts to the group
+        self.addToGroup(self.rhombus)
+        self.addToGroup(self.top_line)
+        self.addToGroup(self.bottom_line)
+        self.addToGroup(self.left_line)
+        self.addToGroup(self.right_line)
+        
+        # set position and properties
+        self.setPos(x, y)
+        self.setFlag(QGraphicsItemGroup.ItemIsMovable, True)
+        self.setFlag(QGraphicsItemGroup.ItemSendsGeometryChanges, True)
+        self.setZValue(1000)
+        
+        self.update_scale()
+
+    def update_scale(self):
+        if self.sprite_manager and self.sprite_manager.graphics_zoom > 0:
+            scale_factor = 1.0 / self.sprite_manager.graphics_zoom
+            self.setScale(scale_factor)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItemGroup.ItemPositionChange and self.scene():
+            new_pos = value
+            
+            # snap to integer pixel coordinates in original image space
+            if self.sprite_manager and self.sprite_manager.zoom > 0:
+                # convert to original image coordinates, round to int, then back to zoomed
+                original_x = new_pos.x() / self.sprite_manager.zoom
+                original_y = new_pos.y() / self.sprite_manager.zoom
+                snapped_original_x = round(original_x)
+                snapped_original_y = round(original_y)
+                new_pos.setX(snapped_original_x * self.sprite_manager.zoom)
+                new_pos.setY(snapped_original_y * self.sprite_manager.zoom)
+                
+            if self.sprite_manager:
+                # convert from zoomed coordinates to original image coordinates
+                original_x = int(new_pos.x() / self.sprite_manager.zoom)
+                original_y = int(new_pos.y() / self.sprite_manager.zoom)
+                self.sprite_manager.origin_x_entry.setText(str(original_x))
+                self.sprite_manager.origin_y_entry.setText(str(original_y))
+                self.sprite_manager.update_data(self.sprite_manager.data[self.sprite_manager.current_path])
+                
+            return new_pos
+        return super().itemChange(change, value)
 
 class ImageView(QGraphicsView):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, sprite_manager=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.sprite_manager = sprite_manager
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
         self._zoom = 1.0
+        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
 
     def wheelEvent(self, event):
         zoomInFactor = 1.25
@@ -45,24 +129,41 @@ class ImageView(QGraphicsView):
             zoomFactor = zoomOutFactor
         self._zoom *= zoomFactor
         self.scale(zoomFactor, zoomFactor)
+        
+        # update origin point scale
+        if self.sprite_manager and self.sprite_manager.origin_point:
+            # update the sprite manager's zoom value to match graphics view zoom
+            self.sprite_manager.graphics_zoom = self._zoom
+            self.sprite_manager.origin_point.update_scale()
+            
         event.accept()
 
     def resetZoom(self):
         self.resetTransform()
         self._zoom = 1.0
+        
+        # update origin point scale when zoom is reset
+        if self.sprite_manager and self.sprite_manager.origin_point:
+            self.sprite_manager.graphics_zoom = self._zoom
+            self.sprite_manager.origin_point.update_scale()
 
 class SpriteManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Sprite Frame Tool")
-        self.resize(700, 800)
+        self.resize(800, 600)
         self.data = {}
         self.image_paths = []
         self.current_path = None
+        self.img_width = 0
+        self.img_height = 0
         self.zoom = 1.0
+        self.graphics_zoom = 1.0
         self.pan_x = 0
         self.pan_y = 0
+        self.origin_point = None
         self.setup_ui()
+        
         save_action = QAction(self)
         save_action.setShortcut(QKeySequence("Ctrl+S"))
         save_action.triggered.connect(self.export_json)
@@ -71,12 +172,12 @@ class SpriteManager(QMainWindow):
     def setup_ui(self):
         # main layout
         central = QWidget()
-        splitter = QSplitter()
+        splitter = QSplitter(Qt.Horizontal)
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
         layout.addWidget(splitter)
 
-        # left panel widget
+        # left panel widget (directory tree + properties)
         left_widget = QWidget()
         left = QVBoxLayout(left_widget)
         left.addWidget(QLabel("Images"))
@@ -86,48 +187,72 @@ class SpriteManager(QMainWindow):
         self.btn_folder = QPushButton("Select Folder")
         self.btn_folder.clicked.connect(self.load_folder)
         left.addWidget(self.btn_folder)
-        btn_export = QPushButton("Save")
-        btn_export.clicked.connect(self.export_json)
-        left.addWidget(btn_export)
+        btn_save = QPushButton("Save")
+        btn_save.clicked.connect(self.export_json)
+        left.addWidget(btn_save)
+
+        # properties tree below images tree
+        left.addWidget(QLabel("Properties"))
+        self.property_tree = QTreeWidget(left_widget)
+        self.property_tree.setHeaderLabels(["Property", "Value"])
+        header = self.property_tree.header()
+        header.resizeSection(0, 180)
+        header.resizeSection(1, 100)
+        left.addWidget(self.property_tree, 5)
+
+        left_widget.setMaximumWidth(400)
+        left_widget.setMinimumWidth(200)
         splitter.addWidget(left_widget)
 
-        # right panel widget
-        right_widget = QWidget()
-        right = QVBoxLayout(right_widget)
-        self.graphics = ImageView()
+        # middle panel widget (sprite view)
+        middle_widget = QWidget()
+        middle_layout = QVBoxLayout(middle_widget)
+        self.graphics = ImageView(self)
         self.scene = QGraphicsScene()
         self.graphics.setScene(self.scene)
-        right.addWidget(self.graphics, 10)
+        middle_layout.addWidget(self.graphics, 10)
+        splitter.addWidget(middle_widget)
+        self.img_size_label = QLabel("")
+        middle_layout.addWidget(self.img_size_label)
 
-        controls = QGridLayout()
-        right.addLayout(controls)
-        controls.addWidget(QLabel("Frame Width"), 0, 0)
-        self.width_entry = QLineEdit()
-        self.width_entry.setFixedWidth(90)
-        controls.addWidget(self.width_entry, 0, 1)
-        controls.addWidget(QLabel("Frame Height"), 0, 2)
-        self.height_entry = QLineEdit()
-        self.height_entry.setFixedWidth(90)
-        controls.addWidget(self.height_entry, 0, 3)
-        controls.addWidget(QLabel("Frame Count X"), 1, 0)
+        self.prop_origin_x = QTreeWidgetItem(self.property_tree, ["Origin X"])
+        self.origin_x_entry = QLineEdit()
+        self.origin_x_entry.setStyleSheet("border: none;")
+        self.property_tree.setItemWidget(self.prop_origin_x, 1, self.origin_x_entry)
+        self.origin_x_entry.editingFinished.connect(self.on_origin_change)
+
+        self.prop_origin_y = QTreeWidgetItem(self.property_tree, ["Origin Y"])
+        self.origin_y_entry = QLineEdit()
+        self.origin_y_entry.setStyleSheet("border: none;")
+        self.property_tree.setItemWidget(self.prop_origin_y, 1, self.origin_y_entry)
+        self.origin_y_entry.editingFinished.connect(self.on_origin_change)
+
+        self.prop_count_x = QTreeWidgetItem(self.property_tree, ["Frame Count X"])
         self.count_x_entry = QLineEdit()
-        self.count_x_entry.setFixedWidth(90)
-        controls.addWidget(self.count_x_entry, 1, 1)
-        controls.addWidget(QLabel("Frame Count Y"), 1, 2)
-        self.count_y_entry = QLineEdit()
-        self.count_y_entry.setFixedWidth(90)
-        controls.addWidget(self.count_y_entry, 1, 3)
-        btn_apply = QPushButton("Apply")
-        btn_apply.clicked.connect(self.apply_frame)
-        right.addWidget(btn_apply)
-        splitter.addWidget(right_widget)
+        self.count_x_entry.setStyleSheet("border: none;")
+        self.property_tree.setItemWidget(self.prop_count_x, 1, self.count_x_entry)
+        self.count_x_entry.editingFinished.connect(self.on_count_change)
 
-        # signals
+        self.prop_count_y = QTreeWidgetItem(self.property_tree, ["Frame Count Y"])
+        self.count_y_entry = QLineEdit()
+        self.count_y_entry.setStyleSheet("border: none;")
+        self.property_tree.setItemWidget(self.prop_count_y, 1, self.count_y_entry)
+        self.count_y_entry.editingFinished.connect(self.on_count_change)
+
+        self.property_tree.expandAll()
         self.tree.itemSelectionChanged.connect(self.on_tree_select)
-        self.width_entry.textChanged.connect(self.on_width_height_change)
-        self.height_entry.textChanged.connect(self.on_width_height_change)
-        self.count_x_entry.textChanged.connect(self.on_count_change)
-        self.count_y_entry.textChanged.connect(self.on_count_change)
+        splitter.setSizes([400, 600])
+
+    def center_origin(self):
+        try:
+            fw = int(self.count_x_entry.text())
+            fh = int(self.count_y_entry.text())
+            origin_x = fw // 2
+            origin_y = fh // 2
+            self.origin_x_entry.setText(str(origin_x))
+            self.origin_y_entry.setText(str(origin_y))
+        except Exception:
+            pass
 
     def load_folder(self):
         # just refresh existing folder and assume the one that's open stays
@@ -170,7 +295,7 @@ class SpriteManager(QMainWindow):
                 parent = node_id
             dirs.sort()
             files.sort()
-            for d in dirs:
+            for _ in dirs:
                 pass
             for f in files:
                 if f.lower().endswith((".png", ".jpg", ".jpeg")):
@@ -178,15 +303,21 @@ class SpriteManager(QMainWindow):
                     self.image_paths.append(path)
                     item = QTreeWidgetItem(parent, [f])
                     item.setData(0, Qt.UserRole, path)
+                    '''
                     if path not in self.data:
                         item.setBackground(0, QBrush(QColor(120, 120, 40)))
                         font = item.font(0)
                         font.setBold(True)
                         item.setFont(0, font)
+                    '''
         
         # remove deleted images from json
         valid_paths = set(self.image_paths)
         self.data = {k: v for k, v in self.data.items() if k in valid_paths}
+        # ensure every image has origin_x and origin_y
+        for path in self.image_paths:
+            if path not in self.data:
+                self.data[path] = {}
 
     def on_tree_select(self):
         selected = self.tree.selectedItems()
@@ -200,187 +331,145 @@ class SpriteManager(QMainWindow):
             self.pan_x = 0
             self.pan_y = 0
             self.graphics.resetZoom()
-            self.show_image()
+            if self.origin_point:
+                self.scene.removeItem(self.origin_point)
+                self.origin_point = None
+            self.apply_frame()
 
     def show_image(self):
         path = self.current_path
         if not path or not os.path.exists(path):
             self.scene.clear()
+            self.origin_point = None
+            self.img_size_label.setText("")
             return
         img = QImage(path)
         if img.isNull():
             self.scene.clear()
+            self.origin_point = None
+            self.img_size_label.setText("")
             return
         pixmap = QPixmap.fromImage(img)
+        self.img_width = img.width()
+        self.img_height = img.height()
         
         # apply zoom
         zoomed_pixmap = pixmap.scaled(pixmap.width() * self.zoom, pixmap.height() * self.zoom, Qt.KeepAspectRatio, Qt.FastTransformation)
         self.scene.clear()
+        self.origin_point = None
         
-        light_brush = QBrush(Qt.darkGray)
-        self.scene.addRect(0, 0, zoomed_pixmap.width(), zoomed_pixmap.height(), brush=light_brush)
+        self.graphics.setSceneRect(QRectF(-10, -10, zoomed_pixmap.width() + 20, zoomed_pixmap.height() + 20))
         self.scene.addPixmap(zoomed_pixmap)
-        self.graphics.setSceneRect(QRectF(0, 0, zoomed_pixmap.width(), zoomed_pixmap.height()))
         
-        entry = self.data.get(path)
-        if entry:
-            self.width_entry.setText(str(entry["frame_width"]))
-            self.height_entry.setText(str(entry["frame_height"]))
-            self.count_x_entry.setText(str(entry.get("frame_count_x", "")))
-            self.count_y_entry.setText(str(entry.get("frame_count_y", "")))
-        else:
-            self.width_entry.clear()
-            self.height_entry.clear()
-            self.count_x_entry.clear()
-            self.count_y_entry.clear()
-        if entry:
-            fw = entry.get("frame_width")
-            fh = entry.get("frame_height")
-            count_x = entry.get("frame_count_x")
-            count_y = entry.get("frame_count_y")
-        else:
-            try:
-                fw = int(self.width_entry.text())
-                fh = int(self.height_entry.text())
-                count_x = int(self.count_x_entry.text())
-                count_y = int(self.count_y_entry.text())
-            except Exception:
-                fw = fh = count_x = count_y = None
-        if fw and fh and count_x and count_y:
-            pen = QPen(QColor(0, 225, 255))
-            width = zoomed_pixmap.width()
-            height = zoomed_pixmap.height()
-            # vert lines
-            for i in range(count_x + 1):
-                x = i * fw * self.zoom
-                if i == count_x:
-                    x = width
-                self.scene.addLine(x, 0, x, height, pen)
-                
-            # horizontal lines
-            for j in range(count_y + 1):
-                y = j * fh * self.zoom
-                if j == count_y:
-                    y = height
-                self.scene.addLine(0, y, width, y, pen)
+        origin_x = int(float(self.origin_x_entry.text()))
+        origin_y = int(float(self.origin_y_entry.text()))
+        
+        count_x = int(float(self.count_x_entry.text()))
+        count_y = int(float(self.count_y_entry.text()))
+        
+        self.img_size_label.setText(f"Image size: {self.img_width} x {self.img_height}\nFrame size: {int(self.img_width/count_x)} x {int(self.img_height/count_y)}")
+        
+        pen = QPen(QColor(0, 225, 255), 0)
+        for i in range(count_x + 1):
+            x = (i / count_x) * self.img_width * self.zoom
+            if i == count_x:
+                x = self.img_width
+            self.scene.addLine(x, 0, x, self.img_height, pen)
+        for i in range(count_y + 1):
+            y = (i / count_y) * self.img_height * self.zoom
+            if i == count_y:
+                y = self.img_height
+            self.scene.addLine(0, y, self.img_width, y, pen)
+            
+        # remove existing origin point if it exists
+        if self.origin_point:
+            self.scene.removeItem(self.origin_point)
+            
+        # create new origin point
+        origin_zoomed_x = origin_x * self.zoom
+        origin_zoomed_y = origin_y * self.zoom
+        self.origin_point = OriginPoint(self, origin_zoomed_x, origin_zoomed_y, 6)
+        self.graphics_zoom = self.graphics._zoom
+        self.scene.addItem(self.origin_point)
 
     def apply_frame(self):
         if not self.current_path:
             return
-        img = QImage(self.current_path)
-        w, h = img.width(), img.height()
-        fw_text = self.width_entry.text()
-        fh_text = self.height_entry.text()
-        count_x_text = self.count_x_entry.text()
-        count_y_text = self.count_y_entry.text()
         
-        # if all fields are blank, set everything to image size and 1
-        if not fw_text and not fh_text and not count_x_text and not count_y_text:
-            fw, fh = w, h
-            count_x, count_y = 1, 1
-            self.width_entry.setText(str(fw))
-            self.height_entry.setText(str(fh))
-            self.count_x_entry.setText("1")
-            self.count_y_entry.setText("1")
-        elif count_x_text and count_y_text:
-            try:
-                count_x = int(count_x_text)
-                count_y = int(count_y_text)
-                if count_x <= 0 or count_y <= 0:
-                    QMessageBox.critical(self, "Error", "Frame count X and Y must be greater than 0.")
-                    return
-                fw = w // count_x
-                fh = h // count_y
-                self.width_entry.setText(str(fw))
-                self.height_entry.setText(str(fh))
-            except ValueError:
-                QMessageBox.critical(self, "Error", "Enter valid integers for frame count")
-                return
-        fw_text = self.width_entry.text()
-        fh_text = self.height_entry.text()
-        try:
-            fw = int(fw_text)
-            fh = int(fh_text)
-            if fw <= 0 or fh <= 0:
-                QMessageBox.critical(self, "Error", "Frame width and height must be greater than 0.")
-                return
-        except ValueError:
-            QMessageBox.critical(self, "Error", "Enter valid integers for frame size")
-            return
-        count_x = w // fw
-        count_y = h // fh
-        self.count_x_entry.setText(str(count_x))
-        self.count_y_entry.setText(str(count_y))
-        self.data[self.current_path] = {
-            "frame_width": fw,
-            "frame_height": fh,
-            "frame_count_x": count_x,
-            "frame_count_y": count_y
-        }
-        
-        # remove highlight from tree item if frame data is now set
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            self._clear_highlight_recursive(item)
+        entry = self.data.get(self.current_path)        
+        if entry:
+            self.count_x_entry.setText(str(entry["frame_count_x"]))
+            self.count_y_entry.setText(str(entry["frame_count_y"]))
+            if "origin_x" in entry:
+                self.origin_x_entry.setText(str(entry["origin_x"]))
+            if "origin_y" in entry:
+                self.origin_y_entry.setText(str(entry["origin_y"]))
+        else:
+            self.count_x_entry.setText(str(1))
+            self.count_y_entry.setText(str(1))
+            self.origin_x_entry.setText(str(0))
+            self.origin_y_entry.setText(str(0))
         
         self.show_image()
 
-    def _clear_highlight_recursive(self, item):
-        if item is None:
-            return
-        path = item.data(0, Qt.UserRole)
+    def update_data(self, entry):
+        frame_count_x = int(float(self.count_x_entry.text()))
+        frame_count_y = int(float(self.count_y_entry.text()))
         
-        if path and path in self.data:
-            if str(path).lower().endswith(('.png', '.jpg', '.jpeg')):
-                item.setBackground(0, Qt.transparent)
-                font = item.font(0)
-                font.setBold(False)
-                item.setFont(0, font)
-            
-        for i in range(item.childCount()):
-            self._clear_highlight_recursive(item.child(i))
-
-    def on_width_height_change(self):
-        if not self.current_path:
-            return
-        img = QImage(self.current_path)
-        w, h = img.width(), img.height()
-        try:
-            fw = int(self.width_entry.text())
-            fh = int(self.height_entry.text())
-            if fw <= 0 or fh <= 0:
-                return
-            count_x = w // fw
-            count_y = h // fh
-            self.count_x_entry.setText(str(count_x))
-            self.count_y_entry.setText(str(count_y))
-        except ValueError:
-            pass
+        entry["frame_count_x"] = frame_count_x
+        entry["frame_count_y"] = frame_count_y
+        
+        entry["origin_x"] = int(float(self.origin_x_entry.text()))
+        entry["origin_y"] = int(float(self.origin_y_entry.text()))
+        
+        entry["frame_width"] = self.img_width // frame_count_x
+        entry["frame_height"] = self.img_height // frame_count_y
 
     def on_count_change(self):
         if not self.current_path:
             return
-        img = QImage(self.current_path)
-        w, h = img.width(), img.height()
         count_x_text = self.count_x_entry.text()
         count_y_text = self.count_y_entry.text()
         if count_x_text and not count_y_text:
-            self.count_y_entry.setText("1")
             count_y_text = "1"
+            self.count_y_entry.setText(count_y_text)
         if count_y_text and not count_x_text:
-            self.count_x_entry.setText("1")
             count_x_text = "1"
+            self.count_x_entry.setText(count_x_text)
         try:
             count_x = int(count_x_text)
             count_y = int(count_y_text)
-            if count_x <= 0 or count_y <= 0:
-                return
-            fw = w // count_x
-            fh = h // count_y
-            self.width_entry.setText(str(fw))
-            self.height_entry.setText(str(fh))
+            if count_x <= 0:
+                self.count_x_entry.setText("1")
+            if count_y <= 0:
+                self.count_y_entry.setText("1")
+            entry = self.data[self.current_path]
+            self.show_image()
+            self.update_data(entry)
         except ValueError:
             pass
+
+    def on_origin_change(self):
+        if self.origin_point:
+            try:
+                # int vals only
+                origin_x = int(float(self.origin_x_entry.text()))
+                origin_y = int(float(self.origin_y_entry.text()))
+                
+                # update text fields to show the integer values a float was typed
+                self.origin_x_entry.setText(str(origin_x))
+                self.origin_y_entry.setText(str(origin_y))
+                
+                # convert to zoomed coordinates
+                zoomed_x = origin_x * self.zoom
+                zoomed_y = origin_y * self.zoom
+                
+                self.origin_point.setPos(zoomed_x, zoomed_y)
+                
+                entry = self.data[self.current_path]
+                self.update_data(entry)
+            except ValueError:
+                pass
 
     def export_json(self):
         if not self.data:
@@ -389,6 +478,8 @@ class SpriteManager(QMainWindow):
         if not self.image_paths:
             QMessageBox.critical(self, "Error", "No images loaded")
             return
+        if self.current_path:
+            self.update_data(self.data[self.current_path])
         root_folder = os.path.commonpath(self.image_paths)
         save_path = os.path.join(root_folder, "data.json")
         output = {os.path.relpath(k, root_folder): v for k, v in self.data.items()}
