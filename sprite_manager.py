@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QGraphicsItemGroup,
     QGraphicsPolygonItem,
-    QGraphicsLineItem
+    QGraphicsLineItem,
+    QGridLayout
 )
 from PySide6.QtGui import (
     QBrush,
@@ -34,6 +35,8 @@ from PySide6.QtCore import (
     QRectF,
     QPointF
 )
+
+JSON_NAME = "sprite_data"
 
 class OriginPoint(QGraphicsItemGroup):
     def __init__(self, sprite_manager, x=0, y=0, size=8):
@@ -184,12 +187,25 @@ class SpriteManager(QMainWindow):
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         left.addWidget(self.tree, 10)
+        
+        grid = QGridLayout()
+        
         self.btn_folder = QPushButton("Select Folder")
         self.btn_folder.clicked.connect(self.load_folder)
-        left.addWidget(self.btn_folder)
-        btn_save = QPushButton("Save")
-        btn_save.clicked.connect(self.export_json)
-        left.addWidget(btn_save)
+        
+        self.btn_folder_refresh = QPushButton("Refresh Folder")
+        self.btn_folder_refresh.clicked.connect(self.load_existing_folder)
+        self.btn_folder_refresh.setEnabled(False)
+        
+        grid.addWidget(self.btn_folder, 0, 0)
+        grid.addWidget(self.btn_folder_refresh, 0, 1)
+        
+        left.addLayout(grid)
+        
+        self.btn_save = QPushButton("Save")
+        self.btn_save.setEnabled(False)
+        self.btn_save.clicked.connect(self.export_json)
+        left.addWidget(self.btn_save)
 
         # properties tree below images tree
         left.addWidget(QLabel("Properties"))
@@ -203,6 +219,7 @@ class SpriteManager(QMainWindow):
         left_widget.setMaximumWidth(400)
         left_widget.setMinimumWidth(200)
         splitter.addWidget(left_widget)
+        splitter.setCollapsible(splitter.indexOf(left_widget), False)
 
         # middle panel widget (sprite view)
         middle_widget = QWidget()
@@ -249,36 +266,28 @@ class SpriteManager(QMainWindow):
             fh = int(self.count_y_entry.text())
             origin_x = fw // 2
             origin_y = fh // 2
+            
             self.origin_x_entry.setText(str(origin_x))
             self.origin_y_entry.setText(str(origin_y))
         except Exception:
             pass
 
-    def load_folder(self):
-        # just refresh existing folder and assume the one that's open stays
-        if hasattr(self, 'current_folder') and self.current_folder:
-            folder = self.current_folder
-        else:
-            folder = QFileDialog.getExistingDirectory(self, "Select Folder")
-            if not folder:
-                return
-            self.current_folder = folder
-            self.btn_folder.setText("Refresh Folder")
-            self.btn_folder.clicked.disconnect()
-            self.btn_folder.clicked.connect(self.load_folder)
-        
+    def load_folder_impl(self, folder):
         self.image_paths = []
         self.tree.clear()
+        self.current_path = None
+        
+        self.show_image()
         
         # load frame data from json if there is one already
-        json_path = os.path.join(folder, "data.json")
+        json_path = os.path.join(folder, f"{JSON_NAME}.json")
         if os.path.exists(json_path):
             try:
                 with open(json_path, "r") as f:
                     loaded = json.load(f)
-                self.data = {os.path.join(folder, k): v for k, v in loaded.items()}
+                self.data = {os.path.join(folder, k.replace('\\', '/')): v for k, v in loaded.items()}
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load data.json: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to load json: {e}")
                 self.data = {}
         else:
             self.data = {}
@@ -317,7 +326,34 @@ class SpriteManager(QMainWindow):
         # ensure every image has origin_x and origin_y
         for path in self.image_paths:
             if path not in self.data:
-                self.data[path] = {}
+                img = QImage(path)
+                if img:
+                    self.data[path] = {}
+                    data = self.data[path]
+                    data["frame_width"] = int(img.width())
+                    data["frame_height"] = int(img.height())
+                    data["frame_count_x"] = 1
+                    data["frame_count_y"] = 1
+                    data["origin_x"] = 0
+                    data["origin_y"] = 0
+
+    def load_existing_folder(self):
+        self.load_folder_impl(self.current_folder)
+
+    def load_folder(self):
+        # just refresh existing folder and assume the one that's open stays
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
+        
+        if not folder:
+            return
+        
+        self.setWindowTitle(f"Sprite Frame Tool - {folder}")
+            
+        self.current_folder = folder
+        self.btn_folder_refresh.setEnabled(True)
+        self.btn_save.setEnabled(True)
+        
+        self.load_folder_impl(folder)
 
     def on_tree_select(self):
         selected = self.tree.selectedItems()
@@ -349,7 +385,9 @@ class SpriteManager(QMainWindow):
             self.origin_point = None
             self.img_size_label.setText("")
             return
+        
         pixmap = QPixmap.fromImage(img)
+        
         self.img_width = img.width()
         self.img_height = img.height()
         
@@ -400,10 +438,8 @@ class SpriteManager(QMainWindow):
         if entry:
             self.count_x_entry.setText(str(entry["frame_count_x"]))
             self.count_y_entry.setText(str(entry["frame_count_y"]))
-            if "origin_x" in entry:
-                self.origin_x_entry.setText(str(entry["origin_x"]))
-            if "origin_y" in entry:
-                self.origin_y_entry.setText(str(entry["origin_y"]))
+            self.origin_x_entry.setText(str(entry["origin_x"]))
+            self.origin_y_entry.setText(str(entry["origin_y"]))
         else:
             self.count_x_entry.setText(str(1))
             self.count_y_entry.setText(str(1))
@@ -481,7 +517,7 @@ class SpriteManager(QMainWindow):
         if self.current_path:
             self.update_data(self.data[self.current_path])
         root_folder = os.path.commonpath(self.image_paths)
-        save_path = os.path.join(root_folder, "data.json")
+        save_path = os.path.join(root_folder, f"{JSON_NAME}.json")
         output = {os.path.relpath(k, root_folder): v for k, v in self.data.items()}
         try:
             with open(save_path, "w") as f:

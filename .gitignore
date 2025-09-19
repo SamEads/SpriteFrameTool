@@ -3,3 +3,5 @@
 *.spec
 *.ico
 /dist
+/venv
+.DS_Store
