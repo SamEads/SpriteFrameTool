@@ -255,6 +255,12 @@ class SpriteManager(QMainWindow):
         self.count_y_entry.setStyleSheet("border: none;")
         self.property_tree.setItemWidget(self.prop_count_y, 1, self.count_y_entry)
         self.count_y_entry.editingFinished.connect(self.on_count_change)
+        
+        self.prop_atlas_page = QTreeWidgetItem(self.property_tree, ["Atlas Page"])
+        self.atlas_page_entry = QLineEdit()
+        self.atlas_page_entry.setStyleSheet("border: none;")
+        self.property_tree.setItemWidget(self.prop_atlas_page, 1, self.atlas_page_entry)
+        self.atlas_page_entry.editingFinished.connect(self.on_atlas_page_change)
 
         self.property_tree.expandAll()
         self.tree.itemSelectionChanged.connect(self.on_tree_select)
@@ -285,7 +291,7 @@ class SpriteManager(QMainWindow):
             try:
                 with open(json_path, "r") as f:
                     loaded = json.load(f)
-                self.data = {os.path.join(folder, k.replace('\\', '/')): v for k, v in loaded.items()}
+                self.data = {os.path.join(folder, k): v for k, v in loaded.items()}
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load json: {e}")
                 self.data = {}
@@ -336,6 +342,10 @@ class SpriteManager(QMainWindow):
                     data["frame_count_y"] = 1
                     data["origin_x"] = 0
                     data["origin_y"] = 0
+                    data["atlas_page"] = 0
+            else:
+                if "atlas_page" not in self.data[path]:
+                    self.data[path]["atlas_page"] = 0
 
     def load_existing_folder(self):
         self.load_folder_impl(self.current_folder)
@@ -396,7 +406,7 @@ class SpriteManager(QMainWindow):
         self.scene.clear()
         self.origin_point = None
         
-        self.graphics.setSceneRect(QRectF(-10, -10, zoomed_pixmap.width() + 20, zoomed_pixmap.height() + 20))
+        self.graphics.setSceneRect(QRectF(-100, -100, zoomed_pixmap.width() + 200, zoomed_pixmap.height() + 200))
         self.scene.addPixmap(zoomed_pixmap)
         
         origin_x = int(float(self.origin_x_entry.text()))
@@ -440,11 +450,13 @@ class SpriteManager(QMainWindow):
             self.count_y_entry.setText(str(entry["frame_count_y"]))
             self.origin_x_entry.setText(str(entry["origin_x"]))
             self.origin_y_entry.setText(str(entry["origin_y"]))
+            self.atlas_page_entry.setText(str(entry["atlas_page"]))
         else:
             self.count_x_entry.setText(str(1))
             self.count_y_entry.setText(str(1))
             self.origin_x_entry.setText(str(0))
             self.origin_y_entry.setText(str(0))
+            self.atlas_page_entry.setText(str(0))
         
         self.show_image()
 
@@ -460,6 +472,13 @@ class SpriteManager(QMainWindow):
         
         entry["frame_width"] = self.img_width // frame_count_x
         entry["frame_height"] = self.img_height // frame_count_y
+
+        entry["atlas_page"] = int(float(self.atlas_page_entry.text()))
+
+    def on_atlas_page_change(self):
+        if not self.current_path:
+            return
+        self.update_data(self.data[self.current_path])
 
     def on_count_change(self):
         if not self.current_path:
